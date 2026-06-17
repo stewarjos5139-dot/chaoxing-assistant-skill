@@ -270,116 +270,92 @@ playwright-cli click e57   # 选择 ref=e57 的 radio
 playwright-cli click "getByRole('radio', { name: 'C 答案描述选择' })"
 ```
 
-### 8.2 题目含图片场景——关键判断流程
+### 8.2 图片题目处理 —— 核心规则 ⚠️
 
-超星题目中经常包含嵌入图片（公式、图表、曲线等）。图片有两种来源：
+**一旦检测到题目包含图片，立即跳过，不做任何图片解析尝试。**
 
-| 来源 | URL 模式 | 说明 |
-|------|----------|------|
-| CDN 图片 | `p.ananas.chaoxing.com/star3/origin/xxx.png` | 需要登录态 |
-| 本地图片 | `mooc1.chaoxing.com/sqp/imgV2?f=xxx` | 同样需要 cookie |
+判断题目含图片的方法：
 
-**尝试获取图片的方法：**
+1. Snapshot 中题干或选项内存在 `<img>` 标签
+2. 选项文字不完整，只有 A/B/C/D 标签但无文字描述（公式图）
+3. 题干依赖图表（如"图(A)~(E)哪一条曲线"、"如图所示"）
 
-1. **snapshot --boxes** 获取图片位置信息：
-   ```bash
-   playwright-cli snapshot --boxes
-   ```
-   输出中包含 `[box=x,y,w,h]` 定位信息，可帮助判断图片在哪个题目和选项中。
+**禁止的行为：**
+- ❌ 禁止 curl 下载图片
+- ❌ 禁止 screenshot 图片元素
+- ❌ 禁止尝试识别图片内容
+- ❌ 禁止猜测图片对应的选项
+- ❌ 禁止因此停止操作询问用户
 
-2. **screenshot 单个图片元素**：
-   ```bash
-   # 截取选项 A 的图片（ref 从 snapshot 获取）
-   playwright-cli screenshot e31 --filename=q1_a.png
-   ```
+**正确的处理方式：**
 
-3. **curl 下载图片（大概率 403）**：
-   ```bash
-   curl -o img.png "https://p.ananas.chaoxing.com/star3/origin/xxx.png"
-   ```
-   > ⚠️ CDN 通常返回 403，因为缺少浏览器 cookie。优先使用 screenshot 方式。
+```
+检测到题目 X 含图片 → 跳过不做 → 继续下一题 → 
+所有题目遍历完后 → 统一汇报跳过明细
+```
 
-4. **提取所有图片 URL**：
-   ```bash
-   playwright-cli --raw eval "Array.from(document.querySelectorAll('img')).map(i => ({src: i.src, w: i.width, h: i.height}))"
-   ```
+**汇报模板：**
 
-> ⚠️ **关键限制**：当前环境无法真正"看"图片内容（`[Unsupported Image]`）。如果图片包含关键信息（公式、坐标轴、角度值等）且无法从文字上下文推断，则无法确定答案。
+```
+### 答题明细
+
+| 题号 | 状态 | 答案 | 说明 |
+|------|------|------|------|
+| Q1 | ⚠️ 跳过 | — | 选项含公式图片 |
+| Q2 | ✅ | C | 文字可确定 |
+| Q3 | ⚠️ 跳过 | — | 题干含 B-x 曲线图 |
+...
+```
 
 ---
 
-## 九、不确定性处理——何时停止并询问用户
+## 九、完成后的操作流程 —— 关键规则 ⚠️
 
-### 9.1 必须停止的情况
+### 9.1 做完所有可答题后，必须执行以下流程：
 
-遇到以下任一情况，**立即停止作答**，向用户说明原因并请求帮助：
+1. **「暂时保存」**——保存已选答案
+2. **不要提交**——绝对不要调用 `submitWork()` 或 `confirmSubmitWork()`
+3. **汇报明细**——列出所有题目的作答状态
+4. **询问用户**——明确问"是否提交？"
+5. **等待批准**——只有用户明确批准后才提交
 
-1. **图片包含关键信息且无法识别**：选项或题干中的图片（公式、图表、曲线）无法从文字推断内容
-2. **题目文字不完整**：题干依赖图片中的变量定义或数值
-3. **多张图片之间存在逻辑关系**：如图表对应的曲线需要看图匹配
-4. **答案有多种合理解释**：且无法从上下文确定出题意图
-
-### 9.2 停止时的操作模板
+### 9.2 汇报模板
 
 ```
-⚠️ 按照你的指示，遇到不能确定答案的情况，先停下来询问。
+### 作业作答完成
 
-### 题目分析结果：
-
-**能确定答案的题目（X道）：**
-| 题号 | 答案 | 解析 |
+**已答题（X道）：**
+| 题号 | 答案 | 分值 |
 |------|------|------|
 
-**无法确定的题目（Y道，含图片）：**
-| 题号 | 问题 | 
+**跳过题（Y道，含图片）：**
+| 题号 | 原因 |
 |------|------|
-| Q1 | XXX 图片内容无法识别 |
-| Q3 | B-x 曲线图无法看到 |
+
+**已保存但未提交。** 是否需要我帮你提交？
 ```
 
-### 9.3 不要猜测图片内容
+### 9.3 用户批准后提交
 
-**禁止**直接猜测公式图片对应的选项。即使知道物理公式的正确答案（如半圆形导线的 B=μ₀I/(4R)），也无法知道 ABCD 哪个选项对应此公式，猜错概率很高。
+```bash
+# 只有用户明确说"提交"/"可以提交"/"帮我提交"后才执行
+playwright-cli eval "confirmSubmitWork()"
+
+# 确认结果
+playwright-cli --raw eval "document.body.innerText"
+# 应显示"提交成功"
+```
+
+### 9.4 用户不批准
+
+如果用户说"先不提交"/"等等"/"我自己检查"：
+- 保持当前状态不动
+- 告知用户已保存，可随时回来提交
+- 如果用户要求，关闭浏览器
 
 ---
 
-## 十、部分作答与不提交策略
-
-### 10.1 跳过无法确定的题目
-
-对于单选题，无法确定的题目直接跳过不选：
-
-```bash
-# 只点击确定题目的 radio，不确定的直接跳过
-playwright-cli click "getByRole('radio', { name: 'C 正确选项描述' })"
-```
-
-### 10.2 保存但不提交
-
-```bash
-# 先「暂时保存」
-playwright-cli click "getByRole('link', { name: '暂时保存' })"
-
-# ⚠️ 绝对不要调用 submitWork() 或点击「提交」按钮
-# 绝对不要调用 confirmSubmitWork()
-```
-
-### 10.3 关闭浏览器
-
-```bash
-playwright-cli close-all
-```
-
-### 10.4 用户后续操作指南
-
-告知用户：
-- 已保存但未提交的作业会保留当前作答状态
-- 下次打开可从上次中断处继续
-- 用户需自行识别图片题目并补答后提交
-
----
-
-## 十一、提交函数完整链
+## 十、提交函数完整链
 
 超星作业提交涉及多个 JS 函数调用链。按可靠性从高到低排列：
 
@@ -438,9 +414,9 @@ playwright-cli --raw eval "document.body.innerText"
 
 ---
 
-## 十二、常见问题与技巧
+## 十一、常见问题与技巧
 
-### 12.1 账号密码安全
+### 11.1 账号密码安全
 
 如果用户在对话中提供了账号密码，用完即忘。**不要将密码写入 skill 文件或任何持久化文件。**
 
@@ -450,11 +426,11 @@ playwright-cli --raw eval "document.body.innerText"
 playwright-cli open --browser=chrome --persistent "https://i.chaoxing.com/base?t=<ts>"
 ```
 
-### 12.2 ref 编号变化
+### 11.2 ref 编号变化
 
 每次页面重新加载，ref 编号都会重新分配。**每次 snapshot 后必须重新读取 ref**，不能复用之前的编号。
 
-### 12.3 iframe 内的元素
+### 11.3 iframe 内的元素
 
 超星大量使用 iframe。Playwright 操作 iframe 内元素的优先级：
 
@@ -462,7 +438,7 @@ playwright-cli open --browser=chrome --persistent "https://i.chaoxing.com/base?t
 2. **eval 注入**：`playwright-cli eval "..." e<ref>`
 3. **run-code 脚本**：复杂交互使用 `run-code`
 
-### 12.4 输出过大
+### 11.4 输出过大
 
 作业页面 snapshot 通常非常大（30KB+），使用 `--raw` 截取关键信息：
 
@@ -470,7 +446,7 @@ playwright-cli open --browser=chrome --persistent "https://i.chaoxing.com/base?t
 playwright-cli --raw eval "document.body.innerText.substring(0, 1000)"
 ```
 
-### 12.5 作业题型判断
+### 11.5 作业题型判断
 
 超星作业题主要分三类：
 
@@ -486,7 +462,7 @@ playwright-cli --raw eval "document.body.innerText.substring(0, 1000)"
 
 单选题直接选择即可，但常含图片公式。
 
-### 12.6 多标签页管理
+### 11.6 多标签页管理
 
 ```bash
 playwright-cli tab-list        # 列出所有标签页
@@ -494,7 +470,7 @@ playwright-cli tab-select 0    # 切回第 0 个标签页
 playwright-cli tab-close 1     # 关闭第 1 个标签页
 ```
 
-### 12.7 浏览器生命周期
+### 11.7 浏览器生命周期
 
 ```bash
 playwright-cli close           # 关闭当前浏览器实例
@@ -504,7 +480,7 @@ playwright-cli kill-all        # 强制杀掉所有浏览器进程
 
 ---
 
-## 十三、完整操作示例
+## 十二、完整操作示例
 
 ### 示例 1：完整简答+程序题（C 语言课程）
 
